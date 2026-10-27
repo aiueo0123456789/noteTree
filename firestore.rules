@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null && request.auth.token.email_verified == true && request.auth.token.firebase.sign_in_provider == 'google.com'; }
+    function email() { return request.auth.token.email.lower(); }
+    function project(pid) { return get(/databases/$(database)/documents/projects/$(pid)).data; }
+    function member(pid) { return signedIn() && email() in project(pid).memberEmails; }
+    function editor(pid) { return member(pid) && project(pid).roles[email()] in ['owner','editor']; }
+    function owner(pid) { return member(pid) && project(pid).roles[email()] == 'owner'; }
+    function validProject(d) {
+      return d.keys().hasOnly(['name','roles','memberEmails','revision','createdBy','state','updatedAt'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 200
+        && d.roles is map && d.roles.size() > 0 && d.roles.size() <= 100
+        && d.roles.values().hasOnly(['owner','editor','viewer']) && d.roles.values().hasAny(['owner'])
+        && d.memberEmails is list && d.memberEmails.size() == d.roles.size()
+        && d.memberEmails.hasAll(d.roles.keys())
+        && d.revision is string && d.revision.size() > 0 && d.revision.size() <= 100
+        && d.createdBy is string && d.state in ['importing','ready'] && d.updatedAt == request.time;
+    }
+    function revised(pid) {
+      let before = get(/databases/$(database)/documents/projects/$(pid)).data;
+      let after = getAfter(/databases/$(database)/documents/projects/$(pid)).data;
+      return after.revision != before.revision && after.updatedAt == request.time;
+    }
+    function comment(d,mid) {
+      return d.keys().hasOnly(['id','type','to','title','content','authorUid','authorEmail','authorName','createdAt'])
+        && d.id == mid && d.type == 'comment' && d.to is string
+        && d.title is string && d.title.size() <= 1000 && d.content is string && d.content.size() <= 100000
+        && d.authorUid is string && d.authorEmail is string && d.authorName is string && d.createdAt is number;
+    }
+    function ownComment(d,mid,pid) {
+      return comment(d,mid) && d.authorUid == request.auth.uid && d.authorEmail == email()
+        && getAfter(/databases/$(database)/documents/projects/$(pid)/models/$(d.to)).data.type == 'text';
+    }
+    function model(d,mid) {
+      return d.id == mid && (
+        (d.type == 'text' && d.keys().hasOnly(['id','type','title','content','tags','position','size','collapsed','index']) && d.title is string && d.content is string && d.tags is list && d.position is map && d.size is map && d.collapsed is bool && (!('index' in d) || (d.index is int && d.index >= 0)))
+        || (d.type == 'tag' && d.keys().hasOnly(['id','type','name','color']) && d.name is string && d.color is string)
+        || (d.type == 'connection' && d.keys().hasOnly(['id','type','from','to']) && d.from is string && d.to is string)
+        || comment(d,mid));
+    }
+    match /projects/{pid} {
+      allow get: if signedIn() && (!exists(/databases/$(database)/documents/projects/$(pid)) || email() in resource.data.memberEmails);
+      allow list: if signedIn() && email() in resource.data.memberEmails;
+      allow create: if signedIn() && validProject(request.resource.data)
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.roles.size() == 1 && request.resource.data.roles[email()] == 'owner';
+      allow update: if member(pid) && validProject(request.resource.data)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.revision != resource.data.revision
+        && (owner(pid) || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revision','updatedAt']));
+      match /models/{mid} {
+        allow read: if member(pid);
+        allow create: if member(pid) && revised(pid) && model(request.resource.data,mid)
+          && (editor(pid) || ownComment(request.resource.data,mid,pid));
+        allow update: if member(pid) && revised(pid) && model(request.resource.data,mid)
+          && (editor(pid) || (resource.data.type == 'comment' && resource.data.authorUid == request.auth.uid
+            && ownComment(request.resource.data,mid,pid)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title','content'])));
+        allow delete: if member(pid) && revised(pid) && (editor(pid) || (resource.data.type == 'comment' && resource.data.authorUid == request.auth.uid));
+      }
+    }
+    // Legacy boards remain private and readable for migration. New clients never write here.
+    match /users/{uid}/boards/{bid} { allow read: if request.auth != null && request.auth.uid == uid; }
+    match /users/{uid}/sessions/{sid} { allow read: if request.auth != null && request.auth.uid == uid; }
+  }
+}

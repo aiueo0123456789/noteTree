@@ -1,0 +1,192 @@
+import '../src/style.css';
+import {RendererManager} from '../src/renderer-manager';
+import {DataLayer, CommandManager, seed} from '../src/model';
+const results = document.querySelector('#results')!;
+const lines: string[] = [];
+const assert = (condition: unknown, name: string) => {if(!condition) throw new Error(name);lines.push(`PASS ${name}`);};
+try {
+  const data=new DataLayer(seed()), commands=new CommandManager(), manager=new RendererManager(data,commands), renderer=manager.board;
+  manager.init();renderer.update();
+  const board=document.querySelector<HTMLElement>('#board')!;
+  const world=document.querySelector<HTMLElement>('#world')!;
+  const cards=[...world.querySelectorAll('[data-node]')];
+  const edges=[...world.querySelectorAll('[data-edge]')];
+  const tags=[...document.querySelectorAll('[data-tag]')];
+  const observer=new MutationObserver(()=>{});
+  observer.observe(document.querySelector('#app')!, {subtree:true,childList:true});
+  const count=document.querySelectorAll('*').length;
+  const start=world.style.transform;
+  const rect=board.getBoundingClientRect();
+  board.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,clientX:rect.left+5,clientY:rect.top+5,button:0}));
+  renderer.update();
+  for(let i=1;i<=200;i++) {
+    window.dispatchEvent(new PointerEvent('pointermove',{clientX:rect.left+5+i,clientY:rect.top+5+i,button:0}));renderer.update();
+  }
+  window.dispatchEvent(new PointerEvent('pointerup'));renderer.update();
+  for(let i=0;i<200;i++) {board.dispatchEvent(new WheelEvent('wheel',{cancelable:true,deltaY:i%2?12:-12,clientX:rect.left+100,clientY:rect.top+100}));renderer.update();}
+  const mutations=observer.takeRecords();
+  assert(mutations.length===0,`200 pan + 200 zoom frames: ${mutations.length} childList mutations`);
+  assert(document.querySelectorAll('*').length===count,`element count stable: ${count}`);
+  assert(world.style.transform!==start,'camera transform updated');
+  assert(cards.every(el=>el===world.querySelector(`[data-node="${el.getAttribute('data-node')}"]`)), 'card identity retained');
+  assert(edges.every(el=>el===world.querySelector(`[data-edge="${el.getAttribute('data-edge')}"]`)), 'edge identity retained');
+  assert(tags.every(el=>el===document.querySelector(`[data-tag="${el.getAttribute('data-tag')}"]`)), 'tag identity retained');
+  const bbox=world.querySelector<HTMLElement>('.bbox')!;
+  const dragCard=world.querySelector<HTMLElement>('[data-node="a"]')!;
+  dragCard.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,clientX:100,clientY:100}));renderer.update();
+  observer.takeRecords();
+  const descriptor=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML')!;
+  const createElement=document.createElement;
+  let parses=0,creates=0;
+  Object.defineProperty(Element.prototype,'innerHTML',{...descriptor,set(value:string){parses++;descriptor.set!.call(this,value);}});
+  document.createElement=function(...args:Parameters<typeof document.createElement>){creates++;return createElement.apply(document,args);} as typeof document.createElement;
+  try {
+    for(let i=1;i<=300;i++){
+      window.dispatchEvent(new PointerEvent('pointermove',{clientX:100+i,clientY:100+i}));renderer.update();
+    }
+  } finally {
+    Object.defineProperty(Element.prototype,'innerHTML',descriptor);document.createElement=createElement;
+  }
+  assert(parses===0&&creates===0,`300 drag frames: ${parses} HTML parses, ${creates} element allocations`);
+  assert(observer.takeRecords().length===0,'drag: no childList mutations');
+  assert(world.querySelector('.bbox')===bbox&&!bbox.hidden,'single BBox reused during drag');
+  assert(dragCard.style.transform.includes('translate'),'drag updates card transform');
+  window.dispatchEvent(new PointerEvent('pointerup'));renderer.update();
+  commands.undo();renderer.update();
+  board.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));renderer.update();
+  assert(world.querySelector('.bbox')===bbox&&bbox.hidden,'deselection hides retained BBox');
+  assert(!document.querySelector('.brand'),'header logo and title removed');
+  observer.takeRecords();
+  const resizeModel=data.getModelByID('a')!;
+  if(resizeModel.type!=='text')throw new Error('fixture');
+  const handle=world.querySelector<HTMLElement>('[data-node="a"] [data-resize]')!;
+  const capture=board.setPointerCapture;
+  board.setPointerCapture=()=>{}; // Synthetic pointers are not registered as active by the browser.
+  handle.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,clientX:100,clientY:100}));renderer.update();
+  parses=0;creates=0;observer.takeRecords();
+  Object.defineProperty(Element.prototype,'innerHTML',{...descriptor,set(value:string){parses++;descriptor.set!.call(this,value);}});
+  document.createElement=function(...args:Parameters<typeof document.createElement>){creates++;return createElement.apply(document,args);} as typeof document.createElement;
+  try {
+    for(let i=1;i<=200;i++){window.dispatchEvent(new PointerEvent('pointermove',{clientX:100+i*.3,clientY:100+i*.2}));renderer.update();}
+  } finally {Object.defineProperty(Element.prototype,'innerHTML',descriptor);document.createElement=createElement;}
+  assert(parses===0&&creates===0&&observer.takeRecords().length===0,'200 resize frames: no HTML parsing, allocation or childList mutations');
+  assert(JSON.stringify(data.getModelByID('a'))===JSON.stringify(resizeModel),'resize preview leaves model unchanged');
+  window.dispatchEvent(new PointerEvent('pointerup'));renderer.update();
+  const resized=data.getModelByID('a')!;
+  assert(resized.type==='text'&&Math.abs(resized.size.x-resizeModel.size.x-60/renderer.camera.zoom)<.001&&Math.abs(resized.size.y-resizeModel.size.y-40/renderer.camera.zoom)<.001,'drop commits size adjusted for camera zoom');
+  assert(resized.type==='text'&&JSON.stringify(resized.position)===JSON.stringify(resizeModel.position),'resize keeps top-left position');
+  commands.undo();renderer.update();assert(JSON.stringify(data.getModelByID('a'))===JSON.stringify(resizeModel),'resize undo restores size');
+  commands.redo();renderer.update();assert(JSON.stringify(data.getModelByID('a'))===JSON.stringify(resized),'resize redo restores size');
+  handle.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,clientX:100,clientY:100}));renderer.update();
+  window.dispatchEvent(new PointerEvent('pointermove',{clientX:-10000,clientY:-10000}));renderer.update();
+  assert(dragCard.style.width==='180px'&&dragCard.style.height==='80px','resize clamps minimum size');
+  board.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));renderer.update();
+  assert(JSON.stringify(data.getModelByID('a'))===JSON.stringify(resized)&&dragCard.style.width===`${resized.type==='text'?resized.size.x:0}px`,'Escape cancels size preview');
+  board.setPointerCapture=capture;
+  commands.undo();renderer.update();observer.takeRecords();
+  const node=data.getModelByID('a')!;
+  if(node.type!=='text') throw new Error('fixture');
+  let title=world.querySelector<HTMLElement>('[data-node="a"] [data-field="title"]')!;
+  data.updateModel('a',{...node,title:'changed',position:{x:200,y:240}});renderer.update();
+  assert(title===world.querySelector('[data-node="a"] [data-field="title"]')&&title.textContent==='changed','model update patches existing title');
+  assert(observer.takeRecords().length===0,'text and position update: no childList mutations');
+  let allReads=0;
+  const originalAll=data.all.bind(data);data.all=()=>{allReads++;return originalAll();};
+  const unrelated=new MutationObserver(()=>{});
+  unrelated.observe(world.querySelector('[data-node="b"]')!,{subtree:true,attributes:true,childList:true,characterData:true});
+  const latest=data.getModelByID('a')!;
+  if(latest.type!=='text')throw new Error('fixture');
+  data.updateModel('a',{...latest,content:'target-only'});renderer.update();
+  assert(allReads===0,'stream update: no full-model scan');
+  assert(unrelated.takeRecords().length===0,'stream update: unrelated card untouched');
+  const tag=data.getModelByID('tag3')!;
+  if(tag.type!=='tag')throw new Error('fixture');
+  data.updateModel('tag3',{...tag,color:'#ff0000'});renderer.update();
+  assert((world.querySelector('[data-node="c"] [data-remove-tag="tag3"]') as HTMLElement).style.getPropertyValue('--tag')==='#ff0000','tag event updates dependent card');
+  assert(unrelated.takeRecords().length===0,'tag event leaves unrelated card untouched');
+  data.updateModel('ab',null);renderer.update();assert(!world.querySelector('[data-edge="ab"]'),'remove event removes matching edge');
+  data.updateModel('ab',{id:'ab',type:'connection',from:'a',to:'b'});renderer.update();assert(!!world.querySelector('[data-edge="ab"]'),'add event adds matching edge');
+  const beforeRedraw=world.querySelector('[data-node="b"]');
+  const cameraBefore=world.style.transform, modelBefore=JSON.stringify(originalAll()),historyBefore=commands.undoStack.length;
+  (document.querySelector('#redraw') as HTMLButtonElement).click();renderer.update();
+  assert(beforeRedraw!==world.querySelector('[data-node="b"]'),'header button explicitly rebuilds model DOM');
+  assert(world.style.transform===cameraBefore&&JSON.stringify(originalAll())===modelBefore&&commands.undoStack.length===historyBefore,'redraw preserves camera, models and history');
+  assert(allReads===0,'normal updates and explicit redraw use indexed model cache');
+  unrelated.disconnect();
+  data.all=originalAll;
+  title=world.querySelector<HTMLElement>('[data-node="a"] [data-field="title"]')!;
+  const tap=()=>{title.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0}));window.dispatchEvent(new PointerEvent('pointerup'));renderer.update();};
+  for(let i=0;i<3;i++) {
+    tap();tap();assert(title.hasAttribute('contenteditable'),`inline edit ${i+1} starts on retained node`);
+    title.textContent='cancelled';title.dispatchEvent(new Event('input'));
+    title.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));renderer.update();
+    assert(title.textContent==='changed',`inline edit ${i+1} cancels cleanly`);
+  }
+  observer.disconnect();
+  const retained=world.querySelector('[data-node="a"]'), history=commands.undoStack.length;
+  manager.switchView('note');
+  assert(document.querySelectorAll('.note-panel').length===3,'note shows current and immediate children');
+  manager.note.navigate('b');
+  assert(manager.note.current==='b'&&document.querySelectorAll('.note-panel').length===2,'child navigation changes current');
+  assert(!!document.querySelector('[data-note="a"] .note-content'),'note displays direct parent content');
+  assert(!document.querySelector('.note-lines'),'note has no line numbers');
+  assert(!!document.querySelector('.tree-guide'),'hierarchy displays ancestor guide lines');
+  assert(!!document.querySelector('.note-parents [data-go="a"]'),'parent navigation is available');
+  (document.querySelector('.note-parents [data-go="a"]') as HTMLButtonElement).click();
+  assert(manager.note.current==='a','parent click returns to root');
+  const noteTitle=document.querySelector<HTMLElement>('.is-current [data-note-field="title"]')!;
+  noteTitle.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+  noteTitle.textContent='Note edit';noteTitle.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+  assert(data.getModelByID('a')?.type==='text'&&(data.getModelByID('a') as {title:string}).title==='Note edit','note editing commits through DataLayer');
+  commands.undo();manager.update();
+  assert(noteTitle.textContent==='changed','note undo patches retained title');
+  const beforeTags=(data.getModelByID('a') as {tags:string[]}).tags;
+  (document.querySelector('.is-current [data-note-add-tag]') as HTMLButtonElement).click();
+  const assign=document.querySelector<HTMLButtonElement>('.note-tag-popover [data-assign][aria-pressed="false"]')!;
+  const assigned=assign.dataset.assign!;assign.click();manager.update();
+  assert((data.getModelByID('a') as {tags:string[]}).tags.includes(assigned),'note popover assigns tag');
+  commands.undo();manager.update();
+  assert(JSON.stringify((data.getModelByID('a') as {tags:string[]}).tags)===JSON.stringify(beforeTags),'note tag assignment supports undo');
+  (document.querySelector('.is-current [data-note-add-tag]') as HTMLButtonElement).click();
+  const nameInput=document.querySelector<HTMLInputElement>('.note-new-tag input')!;nameInput.value='Note tag';
+  document.querySelector('.note-new-tag')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));manager.update();
+  assert(!![...document.querySelectorAll('.is-current .note-tag')].find(el=>el.textContent?.includes('Note tag')),'note creates and assigns a new tag');
+  commands.undo();manager.update();
+  const sibling=document.querySelector('[data-note="c"]');
+  const noteObserver=new MutationObserver(()=>{});noteObserver.observe(sibling!,{subtree:true,childList:true,attributes:true,characterData:true});
+  const current=data.getModelByID('a')!;if(current.type==='text')data.updateModel('a',{...current,content:'new content'});manager.update();
+  assert(noteObserver.takeRecords().length===0,'note model update does not mutate sibling DOM');noteObserver.disconnect();
+  for(let i=0;i<20;i++){manager.switchView('board');manager.switchView('note');}
+  assert(world.querySelector('[data-node="a"]')===retained,'switching retains board model DOM');
+  assert(commands.undoStack.length===history,'navigation and switching do not add commands');
+  data.updateModel('ba',{id:'ba',type:'connection',from:'b',to:'a'});manager.update();
+  assert(document.querySelectorAll('.note-outline [data-go]').length===3,'cyclic hierarchy terminates and includes all nodes');
+  data.updateModel('a',null);manager.update();
+  assert(manager.note.current!=='a','deleting current selects an existing note');
+  const theme=document.documentElement.dataset.theme;
+  (document.querySelector('#theme-toggle') as HTMLButtonElement).click();
+  assert(document.documentElement.dataset.theme!==theme,'theme toggle updates shared theme');
+  (document.querySelector('#theme-toggle') as HTMLButtonElement).click();
+
+  const searchHistory=commands.undoStack.length;
+  const openSearch=()=>window.dispatchEvent(new KeyboardEvent('keydown',{key:'f',metaKey:true,bubbles:true,cancelable:true}));
+  const input=document.querySelector<HTMLInputElement>('.search-bar input')!;
+  const search=(query:string)=>{openSearch();input.value=query;input.dispatchEvent(new Event('input',{bubbles:true}));};
+  search('仕事');
+  assert(!(document.querySelector('.search-panel') as HTMLElement).hidden&&document.activeElement===input,'Cmd+F opens and focuses search');
+  assert(document.querySelectorAll('[data-result]').length===1,'search matches content');
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+  assert(manager.note.current==='b','search result moves Note current');
+  manager.switchView('board');search('挑戦');
+  const target=data.getModelByID('c')!;
+  (document.querySelector('[data-result="c"]') as HTMLButtonElement).click();
+  assert(!(document.querySelector('.search-highlight') as HTMLElement).hidden,'Board search highlights result');
+  if(target.type==='text')assert(Math.abs(renderer.camera.position.x+(target.position.x+target.size.x/2)*renderer.camera.zoom-board.clientWidth/2)<1,'Board search centers camera');
+  document.dispatchEvent(new WheelEvent('wheel',{bubbles:true}));
+  assert((document.querySelector('.search-highlight') as HTMLElement).hidden,'next wheel operation clears highlight');
+  search('no-such-note-123');assert(!document.querySelector('[data-result]'),'no match empties result list');
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+  assert((document.querySelector('.search-panel') as HTMLElement).hidden,'Escape closes search');
+  assert(commands.undoStack.length===searchHistory,'search navigation does not create model commands');
+  results.textContent=lines.join('\n')+'\nALL PASSED';
+} catch(error) {results.textContent=lines.join('\n')+'\nFAIL '+String(error);}
